@@ -15,7 +15,9 @@ function App() {
     isPlaying, togglePlay, setIsPlaying, 
     videoSrc, setVideoSrc,
     duration, setDuration,
-    currentTime, setCurrentTime
+    currentTime, setCurrentTime,
+    clips,          // ✅ 新增這行：把 clips 拿出來
+    splitClip       // ✅ 新增這行：把剪斷功能拿出來
   } = useEditorStore();
   
   // Refs for DOM manipulation
@@ -107,8 +109,13 @@ function App() {
                   ref={videoRef}
                   src={videoSrc} 
                   className="absolute inset-0 w-full h-full object-contain"
-                  onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)} // Get duration
-                  onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)} // Sync time
+                  onLoadedMetadata={(e) => {
+                    const dur = e.currentTarget.duration;
+                    setDuration(dur);
+                    // 當影片載入時，如果還沒有片段，就建立一個涵蓋整支影片的初始片段
+                    useEditorStore.getState().setClips([{ id: 'init', start: 0, end: dur }]);
+                  }} 
+                  onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
                   onEnded={() => setIsPlaying(false)}
                 />
               ) : (
@@ -152,10 +159,15 @@ function App() {
         <div className="h-1/3 min-h-[250px] border-t border-neutral-700 bg-neutral-800 flex flex-col">
           {/* Timeline Toolbar */}
           <div className="h-10 border-b border-neutral-700 flex items-center px-4 gap-2">
-             <button className="p-1.5 hover:bg-neutral-700 rounded text-neutral-300">
+             {/* ✅ 1. 改直接使用 splitClip */}
+             <button 
+               onClick={splitClip}
+               disabled={!videoSrc}
+               className="p-1.5 hover:bg-neutral-700 rounded text-neutral-300 disabled:opacity-50 transition-colors"
+               title="Split (Ctrl+K)"
+             >
                 <Scissors size={18} />
              </button>
-             {/* Time Display */}
              <span className="text-xs text-neutral-500 ml-auto font-mono">
                 {formatTime(currentTime)} / {formatTime(duration)}
              </span>
@@ -163,27 +175,36 @@ function App() {
           
           {/* Tracks Area */}
           <div className="flex-1 p-2 overflow-y-auto relative select-none">
-             {/* Ruler placeholder */}
              <div className="h-6 border-b border-neutral-700 mb-2"></div>
              
-             {/* Interactive Timeline Container */}
              <div 
                ref={timelineRef}
-               className="relative w-full h-32 cursor-pointer"
+               className="relative w-full h-16 cursor-pointer bg-neutral-900 rounded"
                onClick={handleTimelineClick}
              >
-               {/* Video Clip Representation (Fills 100% of the timeline for now) */}
                {videoSrc && (
-                 <div className="absolute top-0 left-0 w-full h-16 bg-blue-900/50 border border-blue-500 rounded flex items-center px-2 text-xs text-blue-200 overflow-hidden">
-                    Primary Track
+                 <div className="absolute top-0 left-0 w-full h-full flex">
+                    {/* ✅ 2. 直接使用 clips 變數，而不是在這邊呼叫 Hook */}
+                    {clips.map((clip, index) => {
+                      const widthPercent = ((clip.end - clip.start) / duration) * 100;
+                      return (
+                        <div 
+                          key={clip.id}
+                          className="h-full bg-blue-900/50 border-y border-r border-blue-500 first:border-l flex items-center px-2 text-xs text-blue-200 overflow-hidden relative hover:bg-blue-800/50 transition-colors"
+                          style={{ width: `${widthPercent}%` }}
+                        >
+                          Clip {index + 1}
+                        </div>
+                      );
+                    })}
                  </div>
                )}
                
-               {/* Red Playhead Indicator */}
+               {/* 播放指針保持不變 */}
                {videoSrc && (
                  <div 
                    className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-10 pointer-events-none"
-                   style={{ left: `${playheadPosition}%` }} // Dynamic movement!
+                   style={{ left: `${playheadPosition}%` }}
                  >
                     <div className="absolute -top-1 -left-1.5 w-3.5 h-3.5 bg-red-500 rounded-full"></div>
                  </div>
