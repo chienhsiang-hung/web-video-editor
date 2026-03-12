@@ -1,10 +1,9 @@
 import { create } from 'zustand';
 
-// 定義「影片片段」的資料結構
 export interface Clip {
   id: string;
-  start: number; // 片段在原始影片中的起點時間
-  end: number;   // 片段在原始影片中的終點時間
+  start: number;
+  end: number;
 }
 
 interface EditorState {
@@ -20,10 +19,15 @@ interface EditorState {
   currentTime: number;
   setCurrentTime: (time: number) => void;
 
-  // 新增：管理時間軸上的片段
   clips: Clip[];
   setClips: (clips: Clip[]) => void;
-  splitClip: () => void; // 核心剪輯功能
+  splitClip: () => void;
+  
+  // === 新增：選取、刪除與排序 ===
+  selectedClipId: string | null;
+  setSelectedClipId: (id: string | null) => void;
+  deleteClip: () => void;
+  reorderClips: (draggedId: string, targetId: string) => void;
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
@@ -39,27 +43,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   currentTime: 0,
   setCurrentTime: (time) => set({ currentTime: time }),
 
-  // 片段狀態初始化
   clips: [],
   setClips: (clips) => set({ clips }),
   
-  // 實作切開影片的邏輯
   splitClip: () => {
     const { clips, currentTime } = get();
-    
-    // 找出目前播放指針所在的那個片段
     const clipIndex = clips.findIndex(c => currentTime > c.start && currentTime < c.end);
-    
-    // 如果指針不在任何片段上，或剛好在邊緣，就不切
     if (clipIndex === -1) return;
 
     const clipToSplit = clips[clipIndex];
-    
-    // 產生兩個新片段：前半段與後半段 (用隨機字串當簡單的 ID)
     const newClip1: Clip = { ...clipToSplit, id: Math.random().toString(36).slice(2, 9), end: currentTime };
     const newClip2: Clip = { ...clipToSplit, id: Math.random().toString(36).slice(2, 9), start: currentTime };
 
-    // 替換原本的陣列
     const newClips = [
       ...clips.slice(0, clipIndex),
       newClip1,
@@ -68,5 +63,29 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     ];
 
     set({ clips: newClips });
-  }
+  },
+
+  // === 實作新功能 ===
+  selectedClipId: null,
+  setSelectedClipId: (id) => set({ selectedClipId: id }),
+  
+  // 刪除目前選取的片段
+  deleteClip: () => set((state) => ({
+    clips: state.clips.filter(c => c.id !== state.selectedClipId),
+    selectedClipId: null // 刪除後清空選取狀態
+  })),
+
+  // 處理拖曳排序 (將 draggedId 移到 targetId 的位置)
+  reorderClips: (draggedId, targetId) => set((state) => {
+    const oldIndex = state.clips.findIndex(c => c.id === draggedId);
+    const newIndex = state.clips.findIndex(c => c.id === targetId);
+    
+    if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return state;
+    
+    const newClips = [...state.clips];
+    const [movedClip] = newClips.splice(oldIndex, 1); // 抽出被拖曳的片段
+    newClips.splice(newIndex, 0, movedClip);          // 插入到目標位置
+    
+    return { clips: newClips };
+  })
 }));
