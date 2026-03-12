@@ -1,6 +1,6 @@
 import { useRef, useEffect, useMemo } from 'react';
 import { Play, Pause, Square, Scissors, Upload, Trash2, Film, Plus } from 'lucide-react';
-import { useEditorStore, type Media } from './store';
+import { useEditorStore, type Clip } from './store';
 
 const formatTime = (seconds: number) => {
   if (isNaN(seconds) || seconds < 0) return '00:00:00';
@@ -12,8 +12,7 @@ const formatTime = (seconds: number) => {
 
 function App() {
   const { 
-    isPlaying, togglePlay, setIsPlaying, 
-    library, clips,
+    isPlaying, togglePlay, setIsPlaying, library, clips,
     currentTime, setCurrentTime,
     selectedClipId, setSelectedClipId, splitClip, deleteClip, reorderClips
   } = useEditorStore();
@@ -23,8 +22,10 @@ function App() {
   const timelineRef = useRef<HTMLDivElement>(null);
   const lastClipIdRef = useRef<string | null>(null);
 
-  // === 核心邏輯 1：計算虛擬時間軸的佈局 ===
-  // 算出每個片段在時間軸上的起點和終點，以及總長度
+  // === 狀態 Ref (用於拖曳計算，避免觸發無謂的 React 重繪) ===
+  const isScrubbingRef = useRef(false);
+  const trimmingRef = useRef<{ id: string, edge: 'left'|'right', startX: number, initialStart: number, initialEnd: number, pxToSec: number, maxDuration: number } | null>(null);
+
   const timelineLayout = useMemo(() => {
     let currentOffset = 0;
     return clips.map(clip => {
@@ -36,90 +37,67 @@ function App() {
   }, [clips]);
 
   const totalDuration = timelineLayout.length > 0 ? timelineLayout[timelineLayout.length - 1].timelineEnd : 0;
-
-  // 找出紅線目前所在的片段，以及對應的原始素材
   const currentActiveClip = timelineLayout.find(c => currentTime >= c.timelineStart && currentTime < c.timelineEnd) || timelineLayout[timelineLayout.length - 1];
   const activeMedia = library.find(m => m.id === currentActiveClip?.mediaId);
 
-  // === 核心邏輯 2：自己實作計時器引擎 (驅動紅線) ===
+  // 播放器心跳引擎
   useEffect(() => {
     let animationFrameId: number;
     let lastTime = performance.now();
-
     const loop = (time: number) => {
       if (isPlaying) {
         const delta = (time - lastTime) / 1000;
         setCurrentTime((prev) => {
           const nextTime = prev + delta;
-          if (nextTime >= totalDuration) {
-            setIsPlaying(false);
-            return totalDuration;
-          }
+          if (nextTime >= totalDuration) { setIsPlaying(false); return totalDuration; }
           return nextTime;
         });
       }
       lastTime = time;
       animationFrameId = requestAnimationFrame(loop);
     };
-
     animationFrameId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animationFrameId);
   }, [isPlaying, totalDuration, setIsPlaying, setCurrentTime]);
 
-  // === 核心邏輯 3：將虛擬時間軸映射到實體 <video> 標籤 (效能最佳化版) ===
+  // 畫面同步引擎
   useEffect(() => {
     if (!currentActiveClip || !activeMedia || !videoRef.current) return;
-
     const video = videoRef.current;
     const desiredVideoTime = currentActiveClip.sourceStart + (currentTime - currentActiveClip.timelineStart);
 
-    // 1. 如果換了影片素材 (跨越到另一部影片)，替換 src 並強制設定時間
     if (video.src !== activeMedia.url) {
       video.src = activeMedia.url;
       video.currentTime = desiredVideoTime;
       lastClipIdRef.current = currentActiveClip.id;
     }
 
-    // 2. 判斷是否需要強制同步影片時間 (避免干擾原生順暢播放)
-    const isClipChanged = lastClipIdRef.current !== currentActiveClip.id; // 跨越到下一個片段
-    const isDesynced = Math.abs(video.currentTime - desiredVideoTime) > 0.5; // 誤差真的大到不行(大於0.5秒)
+    const isClipChanged = lastClipIdRef.current !== currentActiveClip.id;
+    const isDesynced = Math.abs(video.currentTime - desiredVideoTime) > 0.5;
 
-    // 只有在「暫停時(手動點擊)」、「片段切換時」或「嚴重脫軌時」才強制設定 currentTime
-    if (!isPlaying || isClipChanged || isDesynced) {
-      // 避免重複設定極微小的時間差而造成微卡頓
+    // 如果正在手動拖曳紅線(Scrubbing) 或 剪裁片段(Trimming)，我們強制更新畫面以達到即時預覽
+    if (!isPlaying || isClipChanged || isDesynced || isScrubbingRef.current || trimmingRef.current) {
       if (Math.abs(video.currentTime - desiredVideoTime) > 0.05) {
         video.currentTime = desiredVideoTime;
       }
       lastClipIdRef.current = currentActiveClip.id;
     }
 
-    // 3. 控制播放與暫停
-    if (isPlaying && video.paused) {
-      video.play().catch(() => setIsPlaying(false));
-    } else if (!isPlaying && !video.paused) {
-      video.pause();
-    }
+    if (isPlaying && video.paused) video.play().catch(() => setIsPlaying(false));
+    else if (!isPlaying && !video.paused) video.pause();
   }, [currentTime, currentActiveClip, activeMedia, isPlaying, setIsPlaying]);
 
-
-  // 匯入多個影片邏輯
+  // 檔案上傳
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
       const objectUrl = URL.createObjectURL(file);
-      // 利用隱藏的影片標籤先讀取總長度
       const tempVideo = document.createElement('video');
       tempVideo.src = objectUrl;
       tempVideo.onloadedmetadata = () => {
-        const newMedia: Media = {
-          id: Math.random().toString(36).slice(2, 9),
-          url: objectUrl,
-          name: file.name,
-          duration: tempVideo.duration
-        };
-        useEditorStore.getState().addMedia(newMedia); // 加入素材庫並自動放入時間軸
+        useEditorStore.getState().addMedia({ id: Math.random().toString(36).slice(2, 9), url: objectUrl, name: file.name, duration: tempVideo.duration });
       };
-      event.target.value = ''; // 解決無法重複上傳的問題
+      event.target.value = '';
       setIsPlaying(false);
     }
   };
@@ -129,7 +107,6 @@ function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipId) {
         deleteClip();
-        // 刪除後稍微退回時間，避免超出總長
         setCurrentTime(Math.min(currentTime, totalDuration - 0.1));
       }
     };
@@ -137,37 +114,99 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedClipId, deleteClip, currentTime, totalDuration]);
 
-  const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!timelineRef.current || totalDuration === 0) return;
-    if (!(e.target as HTMLElement).closest('.clip-element')) setSelectedClipId(null);
 
+  // === 互動邏輯 1：紅線拖曳滑動 (Scrubbing) ===
+  const updateScrubPosition = (clientX: number) => {
+    if (!timelineRef.current || totalDuration === 0) return;
     const rect = timelineRef.current.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
+    const clickX = clientX - rect.left;
     const percentage = Math.max(0, Math.min(1, clickX / rect.width));
-    setCurrentTime(percentage * totalDuration); // 更新虛擬時間
+    setCurrentTime(percentage * totalDuration);
+  };
+
+  const handleTimelinePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    // 如果點到了黃色把手，不要觸發紅線移動
+    if ((e.target as HTMLElement).closest('.trim-handle')) return;
+    if (!(e.target as HTMLElement).closest('.clip-element')) setSelectedClipId(null);
+    
+    isScrubbingRef.current = true;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId); // 鎖定指標，讓滑鼠移出範圍也能繼續拖
+    updateScrubPosition(e.clientX);
+  };
+
+  const handleTimelinePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isScrubbingRef.current) return;
+    updateScrubPosition(e.clientX);
+  };
+
+  const handleTimelinePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isScrubbingRef.current) {
+      isScrubbingRef.current = false;
+      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    }
+  };
+
+  // === 互動邏輯 2：拖曳邊緣裁切 (Trimming) ===
+  const startTrim = (e: React.PointerEvent, id: string, edge: 'left'|'right', clip: Clip, mediaDuration: number) => {
+    e.stopPropagation(); // 防止觸發紅線移動
+    e.preventDefault();  // 防止觸發 HTML5 拖曳排序
+    if (!timelineRef.current) return;
+
+    // 計算目前的像素對應幾秒鐘 (比例尺)
+    const rect = timelineRef.current.getBoundingClientRect();
+    const pxToSec = totalDuration / rect.width;
+
+    trimmingRef.current = { id, edge, startX: e.clientX, initialStart: clip.sourceStart, initialEnd: clip.sourceEnd, pxToSec, maxDuration: mediaDuration };
+    
+    // 掛載全域監聽器，這樣滑鼠移出把手依然可以拖曳
+    document.addEventListener('pointermove', handleTrimMove);
+    document.addEventListener('pointerup', stopTrim);
+  };
+
+  const handleTrimMove = (e: PointerEvent) => {
+    if (!trimmingRef.current) return;
+    const { id, edge, startX, initialStart, initialEnd, pxToSec, maxDuration } = trimmingRef.current;
+    
+    const deltaX = e.clientX - startX;
+    const deltaTime = deltaX * pxToSec;
+
+    let newStart = initialStart;
+    let newEnd = initialEnd;
+
+    // 計算新時間，並確保不能反向交叉 (保留至少 0.2 秒長度)，也不能超出原始影片長度
+    if (edge === 'left') {
+      newStart = Math.max(0, Math.min(initialStart + deltaTime, initialEnd - 0.2));
+    } else {
+      newEnd = Math.max(initialStart + 0.2, Math.min(initialEnd + deltaTime, maxDuration));
+    }
+
+    useEditorStore.getState().updateClipTrim(id, newStart, newEnd);
+  };
+
+  const stopTrim = () => {
+    trimmingRef.current = null;
+    document.removeEventListener('pointermove', handleTrimMove);
+    document.removeEventListener('pointerup', stopTrim);
   };
 
   const playheadPosition = totalDuration > 0 ? (currentTime / totalDuration) * 100 : 0;
 
   return (
-    <div className="flex flex-col h-screen bg-neutral-900 text-white font-sans">
+    <div className="flex flex-col h-screen bg-neutral-900 text-white font-sans touch-none">
       <input type="file" accept="video/*" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
 
-      <header className="h-14 border-b border-neutral-700 flex items-center px-4 justify-between bg-neutral-800">
+      <header className="h-14 border-b border-neutral-700 flex items-center px-4 justify-between bg-neutral-800 shrink-0">
         <h1 className="font-bold text-lg text-blue-400">WebEditor Pro</h1>
-        <button className="bg-blue-600 hover:bg-blue-500 px-4 py-1.5 rounded text-sm font-semibold transition-colors disabled:opacity-50">
-          Export
-        </button>
+        <button className="bg-blue-600 hover:bg-blue-500 px-4 py-1.5 rounded text-sm font-semibold transition-colors disabled:opacity-50">Export</button>
       </header>
 
       <main className="flex-1 flex flex-col overflow-hidden">
         <div className="flex-1 flex min-h-[40vh]">
           
-          {/* 左側：真實素材庫 (現在會顯示多個影片了) */}
           <aside className="w-1/4 border-r border-neutral-700 bg-neutral-800 p-4 hidden md:flex flex-col">
             <h2 className="text-sm font-semibold mb-4 text-neutral-400">Media Library</h2>
             <div className="flex-1 overflow-y-auto flex flex-col gap-2 mb-4">
-              {library.map((media, i) => (
+              {library.map((media) => (
                 <div key={media.id} className="bg-neutral-900 p-2 rounded flex items-center gap-2 border border-neutral-700">
                   <Film size={16} className="text-blue-400" />
                   <span className="text-xs truncate">{media.name}</span>
@@ -182,13 +221,7 @@ function App() {
           <section className="flex-1 flex flex-col bg-black">
             <div className="flex-1 relative overflow-hidden bg-black">
               {library.length > 0 ? (
-                // 影片播放器 (現在它是被引擎控制的傀儡了)
-                <video 
-                  ref={videoRef} 
-                  className="absolute inset-0 w-full h-full object-contain" 
-                  playsInline
-                  webkit-playsinline="true"
-                />
+                <video ref={videoRef} className="absolute inset-0 w-full h-full object-contain" playsInline webkit-playsinline="true" />
               ) : (
                 <div onClick={() => window.innerWidth < 768 && fileInputRef.current?.click()} className="absolute inset-0 flex flex-col items-center justify-center text-neutral-600 cursor-pointer md:cursor-default">
                   <span className="md:hidden mb-2"><Upload size={32} /></span>
@@ -197,7 +230,7 @@ function App() {
               )}
             </div>
             
-            <div className="h-12 border-t border-neutral-800 flex items-center justify-center gap-4 bg-neutral-900">
+            <div className="h-12 border-t border-neutral-800 flex items-center justify-center gap-4 bg-neutral-900 shrink-0">
               <button disabled={clips.length === 0} onClick={() => { setCurrentTime(0); setIsPlaying(false); }} className="p-2 hover:bg-neutral-800 rounded-full transition-colors text-neutral-400 hover:text-white disabled:opacity-50">
                 <Square size={20} />
               </button>
@@ -209,18 +242,12 @@ function App() {
         </div>
 
         <div className="h-1/3 min-h-[250px] border-t border-neutral-700 bg-neutral-800 flex flex-col">
-          <div className="h-10 border-b border-neutral-700 flex items-center px-4 gap-2">
-            {/* 👇 新增：手機版專用的「加入素材」按鈕 */}
-             <button 
-               onClick={() => fileInputRef.current?.click()} 
-               className="md:hidden p-1.5 hover:bg-neutral-700 rounded text-blue-400 transition-colors" 
-               title="Add Video"
-             >
+          <div className="h-10 border-b border-neutral-700 flex items-center px-4 gap-2 shrink-0">
+             <button onClick={() => fileInputRef.current?.click()} className="md:hidden p-1.5 hover:bg-neutral-700 rounded text-blue-400 transition-colors" title="Add Video">
                 <Plus size={20} />
              </button>
-             {/* 手機版專用的分隔線 */}
-             <div className="w-px h-4 bg-neutral-700 md:hidden mx-1"></div>
-             
+             <div className="w-px h-4 bg-neutral-700 md:hidden mx-1"></div> 
+
              <button onClick={splitClip} disabled={clips.length === 0} className="p-1.5 hover:bg-neutral-700 rounded text-neutral-300 disabled:opacity-50 transition-colors" title="Split">
                 <Scissors size={18} />
              </button>
@@ -235,22 +262,33 @@ function App() {
           <div className="flex-1 p-2 overflow-y-auto relative select-none">
              <div className="h-6 border-b border-neutral-700 mb-2"></div>
              
-             <div ref={timelineRef} className="relative w-full h-16 cursor-pointer bg-neutral-900 rounded" onClick={handleTimelineClick}>
+             {/* 加入 Pointer 事件來監聽滑動 */}
+             <div 
+               ref={timelineRef} 
+               className="relative w-full h-16 cursor-pointer bg-neutral-900 rounded" 
+               onPointerDown={handleTimelinePointerDown}
+               onPointerMove={handleTimelinePointerMove}
+               onPointerUp={handleTimelinePointerUp}
+               onPointerLeave={handleTimelinePointerUp} // 避免滑鼠離開區域後紅線卡住
+             >
                {clips.length > 0 && (
                  <div className="absolute top-0 left-0 w-full h-full flex">
-                    {timelineLayout.map((clip, index) => {
+                    {timelineLayout.map((clip) => {
                       const widthPercent = (clip.duration / totalDuration) * 100;
                       const isSelected = selectedClipId === clip.id;
+                      const media = library.find(m => m.id === clip.mediaId);
                       
                       return (
                         <div 
                           key={clip.id}
-                          className={`clip-element h-full border-y border-r first:border-l flex items-center px-2 text-xs overflow-hidden relative transition-colors cursor-grab active:cursor-grabbing
-                            ${isSelected ? 'bg-yellow-900/60 border-yellow-500 text-yellow-200 z-20' : 'bg-blue-900/50 border-blue-500 text-blue-200 hover:bg-blue-800/50 z-10'}
+                          className={`clip-element h-full border-y border-r first:border-l flex justify-center items-center text-xs overflow-hidden relative transition-colors cursor-grab active:cursor-grabbing
+                            ${isSelected ? 'bg-yellow-900/40 border-yellow-500 text-yellow-200 z-20' : 'bg-blue-900/50 border-blue-500 text-blue-200 hover:bg-blue-800/50 z-10'}
                           `}
                           style={{ width: `${widthPercent}%` }}
                           onClick={() => setSelectedClipId(clip.id)}
-                          draggable
+                          
+                          // 只有在沒有拖曳邊緣的時候，才允許 HTML5 拖曳換位
+                          draggable={!trimmingRef.current}
                           onDragStart={(e) => { e.dataTransfer.setData('text/plain', clip.id); setSelectedClipId(clip.id); }}
                           onDragOver={(e) => e.preventDefault()}
                           onDrop={(e) => {
@@ -259,7 +297,26 @@ function App() {
                             if (draggedId) reorderClips(draggedId, clip.id);
                           }}
                         >
-                          {library.find(m => m.id === clip.mediaId)?.name.substring(0, 10)}...
+                          {/* 顯示素材名稱 */}
+                          <span className="pointer-events-none truncate px-4">{media?.name.substring(0, 10)}...</span>
+
+                          {/* 左右黃色裁切把手 (僅在選取時顯示) */}
+                          {isSelected && media && (
+                            <>
+                              <div 
+                                className="trim-handle absolute left-0 top-0 bottom-0 w-4 bg-yellow-500 cursor-ew-resize z-30 flex items-center justify-center shadow-[2px_0_4px_rgba(0,0,0,0.5)]"
+                                onPointerDown={(e) => startTrim(e, clip.id, 'left', clip, media.duration)}
+                              >
+                                <div className="w-0.5 h-1/3 bg-yellow-800 rounded-full pointer-events-none"></div>
+                              </div>
+                              <div 
+                                className="trim-handle absolute right-0 top-0 bottom-0 w-4 bg-yellow-500 cursor-ew-resize z-30 flex items-center justify-center shadow-[-2px_0_4px_rgba(0,0,0,0.5)]"
+                                onPointerDown={(e) => startTrim(e, clip.id, 'right', clip, media.duration)}
+                              >
+                                <div className="w-0.5 h-1/3 bg-yellow-800 rounded-full pointer-events-none"></div>
+                              </div>
+                            </>
+                          )}
                         </div>
                       );
                     })}
@@ -267,7 +324,7 @@ function App() {
                )}
                
                {clips.length > 0 && (
-                 <div className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-30 pointer-events-none" style={{ left: `${playheadPosition}%` }}>
+                 <div className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-40 pointer-events-none" style={{ left: `${playheadPosition}%` }}>
                     <div className="absolute -top-1 -left-1.5 w-3.5 h-3.5 bg-red-500 rounded-full"></div>
                  </div>
                )}

@@ -40,6 +40,9 @@ interface EditorState {
   splitClip: () => void;
   deleteClip: () => void;
   reorderClips: (draggedId: string, targetId: string) => void;
+
+ // === 新增：更新片段的頭尾裁切時間 ===
+  updateClipTrim: (id: string, newStart: number, newEnd: number) => void;
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
@@ -113,5 +116,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const [moved] = newClips.splice(oldIndex, 1);
     newClips.splice(newIndex, 0, moved);
     return { clips: newClips };
-  })
+  }),
+
+  // === 實作 Trim 邏輯：更新指定 Clip 的長度 ===
+  updateClipTrim: (id, newStart, newEnd) => set((state) => ({
+    clips: state.clips.map(c => c.id === id ? { ...c, sourceStart: newStart, sourceEnd: newEnd } : c)
+  }))
 }));
