@@ -1,5 +1,5 @@
 import { useRef, useEffect, useMemo, useState } from 'react';
-import { Play, Pause, Square, Scissors, Upload, Trash2, Plus, Diamond } from 'lucide-react';
+import { Play, Pause, Square, Scissors, Upload, Trash2, Plus, Diamond, Loader2 } from 'lucide-react';
 import { useGesture } from '@use-gesture/react';
 import { useEditorStore, type Clip, type Transform } from './store';
 
@@ -11,21 +11,14 @@ const formatTime = (seconds: number) => {
   return [h, m, s].map((v) => v.toString().padStart(2, '0')).join(':');
 };
 
-// === 核心數學：線性插值演算 (Linear Interpolation) ===
-// 根據目前的時間點，計算出畫面應該要在什麼縮放與位置
 const getInterpolatedTransform = (clip: Clip, timeInClip: number): Transform => {
   if (!clip.keyframes || clip.keyframes.length === 0) return clip.baseTransform;
-  
   const sorted = [...clip.keyframes].sort((a, b) => a.timeOffset - b.timeOffset);
   if (sorted.length === 1) return sorted[0].transform;
-
   const before = sorted.filter(k => k.timeOffset <= timeInClip).pop();
   const after = sorted.find(k => k.timeOffset > timeInClip);
-
   if (!before) return after!.transform;
   if (!after) return before.transform;
-
-  // 計算進度比例 (0 ~ 1)
   const progress = (timeInClip - before.timeOffset) / (after.timeOffset - before.timeOffset);
   return {
     x: before.transform.x + (after.transform.x - before.transform.x) * progress,
@@ -46,17 +39,22 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const previewContainerRef = useRef<HTMLDivElement>(null); // 用來抓取預覽框的大小
+
+  // === 匯出相關 Refs 與狀態 ===
+  const exportCanvasRef = useRef<HTMLCanvasElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const isExportingRef = useRef(false);
+  const [isExporting, setIsExporting] = useState(false);
+
   const lastClipIdRef = useRef<string | null>(null);
   const isScrubbingRef = useRef(false);
   const trimmingRef = useRef<{ id: string, edge: 'left'|'right', startX: number, initialStart: number, initialEnd: number, pxToSec: number, maxDuration: number } | null>(null);
 
-  // 用來在 UI 上即時渲染變形的狀態
   const [currentRenderTransform, setCurrentRenderTransform] = useState<Transform>({ x: 0, y: 0, scale: 1 });
-
-  // 👇 新增這兩行：用來解決閃爍與跑回原位的問題
-  const isTransformingRef = useRef(false); // 記錄「現在是不是正在拖曳/縮放」
+  const isTransformingRef = useRef(false); 
   const transformRef = useRef(currentRenderTransform);
-  transformRef.current = currentRenderTransform; // 確保它永遠持有最新的變形數值
+  transformRef.current = currentRenderTransform; 
 
   const timelineLayout = useMemo(() => {
     let currentOffset = 0;
@@ -71,11 +69,63 @@ function App() {
   const totalDuration = timelineLayout.length > 0 ? timelineLayout[timelineLayout.length - 1].timelineEnd : 0;
   const currentActiveClip = timelineLayout.find(c => currentTime >= c.timelineStart && currentTime < c.timelineEnd) || timelineLayout[timelineLayout.length - 1];
   const activeMedia = library.find(m => m.id === currentActiveClip?.mediaId);
-
-  // 計算目前在 Clip 內的相對時間 (用於關鍵幀計算)
   const timeInActiveClip = currentActiveClip ? currentActiveClip.sourceStart + (currentTime - currentActiveClip.timelineStart) : 0;
 
-  // 播放器引擎
+  // === 🚀 匯出核心邏輯 ===
+  const startExport = () => {
+    if (clips.length === 0 || !exportCanvasRef.current || !videoRef.current) return;
+    
+    // 1. 初始化環境
+    setCurrentTime(0);
+    setIsExporting(true);
+    isExportingRef.current = true;
+    const canvas = exportCanvasRef.current;
+    
+    // 2. 設定匯出解析度 (以 720p 為基準)
+    canvas.width = 1280;
+    canvas.height = 1280 / (projectAspectRatio || 16/9);
+
+    // 3. 擷取 Canvas 影像串流
+    let stream = canvas.captureStream(30); // 30 FPS
+
+    // 嘗試擷取影片原聲 (有些瀏覽器可能不支援)
+    try {
+      const vidNode = videoRef.current as any;
+      const vidStream = vidNode.captureStream ? vidNode.captureStream() : vidNode.mozCaptureStream ? vidNode.mozCaptureStream() : null;
+      if (vidStream && vidStream.getAudioTracks().length > 0) {
+        stream = new MediaStream([ ...stream.getVideoTracks(), ...vidStream.getAudioTracks() ]);
+      }
+    } catch (e) {
+      console.warn("Audio capture not supported on this browser.");
+    }
+
+    // 4. 設定錄影機 (優先使用 vp9 編碼)
+    const mimeType = MediaRecorder.isTypeSupported('video/webm; codecs=vp9') ? 'video/webm; codecs=vp9' : 'video/webm';
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8000000 }); // 8Mbps 高畫質
+    mediaRecorderRef.current = recorder;
+
+    const chunks: BlobPart[] = [];
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    
+    // 5. 錄製完成後的下載處理
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'WebEditor_Export.webm'; // 下載檔名
+      a.click();
+      URL.revokeObjectURL(url);
+      setIsExporting(false);
+      isExportingRef.current = false;
+    };
+
+    // 開始錄影與播放
+    recorder.start();
+    setIsPlaying(true);
+  };
+
+  // 播放器心跳引擎
   useEffect(() => {
     let animationFrameId: number; let lastTime = performance.now();
     const loop = (time: number) => {
@@ -83,7 +133,14 @@ function App() {
         const delta = (time - lastTime) / 1000;
         setCurrentTime((prev) => {
           const nextTime = prev + delta;
-          if (nextTime >= totalDuration) { setIsPlaying(false); return totalDuration; }
+          if (nextTime >= totalDuration) { 
+            setIsPlaying(false); 
+            // 如果跑到盡頭時正在匯出，就停止錄影！
+            if (isExportingRef.current && mediaRecorderRef.current?.state === 'recording') {
+              mediaRecorderRef.current.stop();
+            }
+            return totalDuration; 
+          }
           return nextTime;
         });
       }
@@ -93,18 +150,16 @@ function App() {
     return () => cancelAnimationFrame(animationFrameId);
   }, [isPlaying, totalDuration, setIsPlaying, setCurrentTime]);
 
-  // 畫面同步與【動畫插值更新】引擎
+  // 畫面同步與【匯出繪圖】引擎
   useEffect(() => {
     if (!currentActiveClip || !activeMedia || !videoRef.current) return;
     const video = videoRef.current;
     
-    // 🚨 關鍵修復：只有在「沒有正在手動變形」的時候，才讓引擎去算插值，避免打架！
     if (!isTransformingRef.current) {
       const interpolated = getInterpolatedTransform(currentActiveClip, timeInActiveClip);
       setCurrentRenderTransform(interpolated);
     }
 
-    // 2. 影片時間同步邏輯 (保持不變)
     const desiredVideoTime = currentActiveClip.sourceStart + (currentTime - currentActiveClip.timelineStart);
     if (video.src !== activeMedia.url) { video.src = activeMedia.url; video.currentTime = desiredVideoTime; lastClipIdRef.current = currentActiveClip.id; }
     const isClipChanged = lastClipIdRef.current !== currentActiveClip.id;
@@ -115,11 +170,47 @@ function App() {
       lastClipIdRef.current = currentActiveClip.id;
     }
 
+    // === 🎬 隱藏的 Canvas 渲染邏輯 (專供匯出使用) ===
+    if (isExportingRef.current && exportCanvasRef.current && previewContainerRef.current) {
+      const canvas = exportCanvasRef.current;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        // 計算實際匯出影片與小預覽框的比例尺
+        const scaleFactor = canvas.width / previewContainerRef.current.clientWidth;
+
+        // 清除背景
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // 套用動畫變形矩陣
+        ctx.save();
+        ctx.translate(canvas.width / 2, canvas.height / 2); // 移至中心點
+        const transformToRender = isTransformingRef.current ? transformRef.current : getInterpolatedTransform(currentActiveClip, timeInActiveClip);
+        ctx.translate(transformToRender.x * scaleFactor, transformToRender.y * scaleFactor);
+        ctx.scale(transformToRender.scale, transformToRender.scale);
+        ctx.translate(-canvas.width / 2, -canvas.height / 2); // 移回原點
+
+        // 計算 object-fit: cover 裁切邏輯
+        const vRatio = video.videoWidth / video.videoHeight;
+        const cRatio = canvas.width / canvas.height;
+        let dWidth, dHeight, dx, dy;
+        if (vRatio > cRatio) {
+          dHeight = canvas.height; dWidth = canvas.height * vRatio;
+        } else {
+          dWidth = canvas.width; dHeight = canvas.width / vRatio;
+        }
+        dx = (canvas.width - dWidth) / 2; dy = (canvas.height - dHeight) / 2;
+
+        // 畫上目前的影像幀
+        ctx.drawImage(video, dx, dy, dWidth, dHeight);
+        ctx.restore();
+      }
+    }
+
     if (isPlaying && video.paused) video.play().catch(() => setIsPlaying(false));
     else if (!isPlaying && !video.paused) video.pause();
   }, [currentTime, currentActiveClip, activeMedia, isPlaying, setIsPlaying, timeInActiveClip]);
 
-  // 檔案匯入 (自動抓取第一支影片比例)
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
@@ -127,35 +218,26 @@ function App() {
       const tempVideo = document.createElement('video');
       tempVideo.src = objectUrl;
       tempVideo.onloadedmetadata = () => {
-        // 如果是第一支影片，設定專案畫布比例！
-        if (library.length === 0) {
-          setProjectAspectRatio(tempVideo.videoWidth / tempVideo.videoHeight);
-        }
+        if (library.length === 0) setProjectAspectRatio(tempVideo.videoWidth / tempVideo.videoHeight);
         useEditorStore.getState().addMedia({ id: Math.random().toString(36).slice(2, 9), url: objectUrl, name: file.name, duration: tempVideo.duration });
       };
       event.target.value = ''; setIsPlaying(false);
     }
   };
 
-  // === 互動邏輯：手勢追蹤 (Pan & Zoom) ===
   const bindGestures = useGesture({
     onDragStart: () => { isTransformingRef.current = true; }, 
     onDrag: ({ offset: [x, y] }) => {
-      if (!currentActiveClip || !selectedClipId || selectedClipId !== currentActiveClip.id) return;
+      if (!currentActiveClip || !selectedClipId || selectedClipId !== currentActiveClip.id || isExporting) return;
       const newTransform = { ...transformRef.current, x, y };
-      
-      // 👈 關鍵改動：傳入 timeInActiveClip，觸發自動關鍵幀！
       updateClipTransform(currentActiveClip.id, newTransform, timeInActiveClip); 
       setCurrentRenderTransform(newTransform); 
     },
     onDragEnd: () => { isTransformingRef.current = false; }, 
-    
     onPinchStart: () => { isTransformingRef.current = true; }, 
-    onPinch: ({ offset: [scale, angle] }) => {
-      if (!currentActiveClip || !selectedClipId || selectedClipId !== currentActiveClip.id) return;
+    onPinch: ({ offset: [scale] }) => {
+      if (!currentActiveClip || !selectedClipId || selectedClipId !== currentActiveClip.id || isExporting) return;
       const newTransform = { ...transformRef.current, scale }; 
-      
-      // 👈 關鍵改動：傳入 timeInActiveClip，觸發自動關鍵幀！
       updateClipTransform(currentActiveClip.id, newTransform, timeInActiveClip); 
       setCurrentRenderTransform(newTransform);
     },
@@ -165,25 +247,22 @@ function App() {
     pinch: { from: () => [transformRef.current.scale, 0], scaleBounds: { min: 0.1, max: 10 }, modifierKey: 'ctrlKey' } 
   });
 
-
-  // (保留時間軸拖曳邏輯...)
   const updateScrubPosition = (clientX: number) => {
-    if (!timelineRef.current || totalDuration === 0) return;
+    if (!timelineRef.current || totalDuration === 0 || isExporting) return;
     const rect = timelineRef.current.getBoundingClientRect();
     const clickX = clientX - rect.left;
     setCurrentTime(Math.max(0, Math.min(clickX / TIME_SCALE, totalDuration)));
   };
   const handleTimelinePointerDown = (e: React.PointerEvent) => {
-    if ((e.target as HTMLElement).closest('.trim-handle')) return;
+    if ((e.target as HTMLElement).closest('.trim-handle') || isExporting) return;
     if (!(e.target as HTMLElement).closest('.clip-element')) setSelectedClipId(null);
     isScrubbingRef.current = true; (e.target as HTMLElement).setPointerCapture(e.pointerId); updateScrubPosition(e.clientX);
   };
   const handleTimelinePointerMove = (e: React.PointerEvent) => { if (isScrubbingRef.current) updateScrubPosition(e.clientX); };
   const handleTimelinePointerUp = (e: React.PointerEvent) => { if (isScrubbingRef.current) { isScrubbingRef.current = false; (e.target as HTMLElement).releasePointerCapture(e.pointerId); } };
 
-  // (保留 Trim 邏輯...)
   const startTrim = (e: React.PointerEvent, id: string, edge: 'left'|'right', clip: Clip, mediaDuration: number) => {
-    e.stopPropagation(); e.preventDefault(); if (!timelineRef.current) return;
+    e.stopPropagation(); e.preventDefault(); if (!timelineRef.current || isExporting) return;
     trimmingRef.current = { id, edge, startX: e.clientX, initialStart: clip.sourceStart, initialEnd: clip.sourceEnd, pxToSec: 1/TIME_SCALE, maxDuration: mediaDuration };
     document.addEventListener('pointermove', handleTrimMove); document.addEventListener('pointerup', stopTrim);
   };
@@ -198,21 +277,35 @@ function App() {
   };
   const stopTrim = () => { trimmingRef.current = null; document.removeEventListener('pointermove', handleTrimMove); document.removeEventListener('pointerup', stopTrim); };
 
-  // 判斷目前時間點是否已經有一個關鍵幀
   const hasKeyframeHere = currentActiveClip?.keyframes.some(k => Math.abs(k.timeOffset - timeInActiveClip) < 0.1);
 
   return (
     <div className="flex flex-col h-screen bg-neutral-900 text-white font-sans touch-none select-none">
       <input type="file" accept="video/*" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
+      
+      {/* 隱藏的 Canvas 供錄製匯出使用 */}
+      <canvas ref={exportCanvasRef} className="hidden"></canvas>
 
       <header className="h-14 border-b border-neutral-700 flex items-center px-4 justify-between bg-neutral-800 shrink-0">
         <h1 className="font-bold text-lg text-blue-400">WebEditor Pro</h1>
-        <button className="bg-blue-600 hover:bg-blue-500 px-4 py-1.5 rounded text-sm font-semibold transition-colors disabled:opacity-50">Export</button>
+        
+        {/* 🚀 匯出按鈕 */}
+        <button 
+          onClick={startExport} 
+          disabled={clips.length === 0 || isExporting} 
+          className={`flex items-center gap-2 px-4 py-1.5 rounded text-sm font-semibold transition-colors disabled:opacity-80
+            ${isExporting ? 'bg-indigo-600 animate-pulse' : 'bg-blue-600 hover:bg-blue-500'}`}
+        >
+          {isExporting && <Loader2 size={16} className="animate-spin" />}
+          {isExporting ? `Exporting... ${Math.floor((currentTime / totalDuration) * 100)}%` : 'Export WebM'}
+        </button>
       </header>
 
-      <main className="flex-1 flex flex-col overflow-hidden">
+      <main className="flex-1 flex flex-col overflow-hidden relative">
+        {/* 匯出時的防誤觸遮罩 */}
+        {isExporting && <div className="absolute inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm"><span className="text-xl font-bold animate-pulse">Rendering Video... Please wait.</span></div>}
+
         <div className="flex-1 flex min-h-[40vh]">
-          
           <aside className="w-1/4 border-r border-neutral-700 bg-neutral-800 p-4 hidden md:flex flex-col">
             <h2 className="text-sm font-semibold mb-4 text-neutral-400">Media Library</h2>
             <button onClick={() => fileInputRef.current?.click()} className="w-full bg-neutral-700 hover:bg-neutral-600 py-3 rounded-lg flex justify-center items-center text-neutral-300 transition-colors gap-2 text-sm font-semibold">
@@ -220,35 +313,32 @@ function App() {
             </button>
           </aside>
 
-          {/* === 核心畫面區塊：虛擬畫布 === */}
           <section className="flex-1 flex flex-col bg-neutral-950">
             <div className="flex-1 relative overflow-hidden flex items-center justify-center p-4">
-              
               {library.length > 0 ? (
-                // 虛擬畫布 (Canvas)：鎖定第一支影片的比例，並裁切溢出的部分
                 <div 
-                  className="relative bg-black ring-1 ring-neutral-700 overflow-hidden shadow-2xl touch-none" /* 👈 確保加上 touch-none */
+                  ref={previewContainerRef} /* 👈 綁定 Ref 用來抓取比例尺 */
+                  className="relative bg-black ring-1 ring-neutral-700 overflow-hidden shadow-2xl touch-none"
                   style={{ 
                     aspectRatio: projectAspectRatio || '16/9',
                     maxWidth: '100%', maxHeight: '100%',
                     width: projectAspectRatio && projectAspectRatio > 1 ? '100%' : 'auto',
                     height: projectAspectRatio && projectAspectRatio <= 1 ? '100%' : 'auto',
                   }}
-                  {...bindGestures()} // 👈 這次就不會報錯了！
+                  {...bindGestures()}
                 >
                   <video 
                     ref={videoRef} 
                     className="absolute inset-0 w-full h-full object-cover" 
                     playsInline 
                     webkit-playsinline="true" 
+                    crossOrigin="anonymous" /* 👈 允許 Canvas 抓取畫面 */
                     style={{
-                      // 👈 套用變形矩陣，並將中心點設為正中央
                       transform: `translate(${currentRenderTransform.x}px, ${currentRenderTransform.y}px) scale(${currentRenderTransform.scale})`,
                       transformOrigin: 'center center',
                       cursor: selectedClipId === currentActiveClip?.id ? 'move' : 'default'
                     }}
                   />
-                  {/* 選取狀態的框線提示 */}
                   {selectedClipId === currentActiveClip?.id && (
                     <div className="absolute inset-0 border-2 border-yellow-500 pointer-events-none z-50 mix-blend-difference"></div>
                   )}
@@ -267,17 +357,8 @@ function App() {
               <button onClick={togglePlay} disabled={clips.length === 0} className="p-2 hover:bg-neutral-800 rounded-full transition-colors">
                 {isPlaying ? <Pause size={24} /> : <Play size={24} />}
               </button>
-              
               <div className="mx-auto"></div>
-
-              {/* 關鍵幀按鈕 (菱形) */}
-              <button 
-                disabled={!selectedClipId || !currentActiveClip}
-                onClick={() => toggleKeyframe(currentActiveClip!.id, timeInActiveClip, currentRenderTransform)}
-                className={`p-2 rounded-full transition-colors flex items-center gap-2 text-sm font-semibold
-                  ${hasKeyframeHere ? 'text-yellow-400 bg-yellow-900/30' : 'text-neutral-400 hover:bg-neutral-800 disabled:opacity-50'}`}
-                title="Add Keyframe"
-              >
+              <button disabled={!selectedClipId || !currentActiveClip} onClick={() => toggleKeyframe(currentActiveClip!.id, timeInActiveClip, currentRenderTransform)} className={`p-2 rounded-full transition-colors flex items-center gap-2 text-sm font-semibold ${hasKeyframeHere ? 'text-yellow-400 bg-yellow-900/30' : 'text-neutral-400 hover:bg-neutral-800 disabled:opacity-50'}`} title="Add Keyframe">
                 <Diamond size={20} fill={hasKeyframeHere ? "currentColor" : "none"} />
                 <span className="hidden md:inline">Keyframe</span>
               </button>
@@ -285,7 +366,6 @@ function App() {
           </section>
         </div>
 
-        {/* 時間軸區域保留，並加入關鍵幀的小白點提示 */}
         <div className="h-1/3 min-h-[250px] border-t border-neutral-700 bg-neutral-800 flex flex-col">
           <div className="h-10 border-b border-neutral-700 flex items-center px-4 gap-2 shrink-0">
              <button onClick={() => fileInputRef.current?.click()} className="md:hidden p-1.5 hover:bg-neutral-700 rounded text-blue-400"><Plus size={20} /></button>
@@ -302,15 +382,9 @@ function App() {
                     {timelineLayout.map((clip) => {
                       const widthPx = clip.duration * TIME_SCALE;
                       const isSelected = selectedClipId === clip.id;
-                      
                       return (
                         <div key={clip.id} className={`clip-element h-full border-y border-r first:border-l flex justify-center items-center text-xs overflow-hidden relative transition-colors shrink-0 ${isSelected ? 'bg-yellow-900/40 border-yellow-500 text-yellow-200 z-20' : 'bg-blue-900/50 border-blue-500 text-blue-200 hover:bg-blue-800/50 z-10'}`} style={{ width: `${widthPx}px` }} onClick={() => setSelectedClipId(clip.id)}>
-                          
-                          {/* 渲染關鍵幀的標記點 */}
-                          {clip.keyframes.map(kf => (
-                            <div key={kf.id} className="absolute top-1 w-2 h-2 bg-white rounded-full transform -translate-x-1/2 rotate-45 z-40 shadow" style={{ left: `${(kf.timeOffset / clip.duration) * 100}%` }}></div>
-                          ))}
-
+                          {clip.keyframes.map(kf => (<div key={kf.id} className="absolute top-1 w-2 h-2 bg-white rounded-full transform -translate-x-1/2 rotate-45 z-40 shadow" style={{ left: `${(kf.timeOffset / clip.duration) * 100}%` }}></div>))}
                           {isSelected && (
                             <>
                               <div className="trim-handle absolute left-0 top-0 bottom-0 w-4 bg-yellow-500 cursor-ew-resize z-30 flex items-center justify-center" onPointerDown={(e) => startTrim(e, clip.id, 'left', clip, library.find(m=>m.id===clip.mediaId)?.duration || 0)}><div className="w-0.5 h-1/3 bg-yellow-800 rounded-full pointer-events-none"></div></div>
@@ -322,9 +396,7 @@ function App() {
                     })}
                  </div>
                )}
-               {clips.length > 0 && (
-                 <div className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-40 pointer-events-none" style={{ transform: `translateX(${currentTime * TIME_SCALE}px)` }}><div className="absolute -top-1 -left-1.5 w-3.5 h-3.5 bg-red-500 rounded-full"></div></div>
-               )}
+               {clips.length > 0 && (<div className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-40 pointer-events-none" style={{ transform: `translateX(${currentTime * TIME_SCALE}px)` }}><div className="absolute -top-1 -left-1.5 w-3.5 h-3.5 bg-red-500 rounded-full"></div></div>)}
              </div>
           </div>
         </div>
