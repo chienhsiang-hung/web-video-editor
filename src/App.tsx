@@ -53,6 +53,11 @@ function App() {
   // 用來在 UI 上即時渲染變形的狀態
   const [currentRenderTransform, setCurrentRenderTransform] = useState<Transform>({ x: 0, y: 0, scale: 1 });
 
+  // 👇 新增這兩行：用來解決閃爍與跑回原位的問題
+  const isTransformingRef = useRef(false); // 記錄「現在是不是正在拖曳/縮放」
+  const transformRef = useRef(currentRenderTransform);
+  transformRef.current = currentRenderTransform; // 確保它永遠持有最新的變形數值
+
   const timelineLayout = useMemo(() => {
     let currentOffset = 0;
     return clips.map(clip => {
@@ -93,11 +98,13 @@ function App() {
     if (!currentActiveClip || !activeMedia || !videoRef.current) return;
     const video = videoRef.current;
     
-    // 1. 計算目前的動畫數值 (x, y, scale)
-    const interpolated = getInterpolatedTransform(currentActiveClip, timeInActiveClip);
-    setCurrentRenderTransform(interpolated);
+    // 🚨 關鍵修復：只有在「沒有正在手動變形」的時候，才讓引擎去算插值，避免打架！
+    if (!isTransformingRef.current) {
+      const interpolated = getInterpolatedTransform(currentActiveClip, timeInActiveClip);
+      setCurrentRenderTransform(interpolated);
+    }
 
-    // 2. 影片時間同步邏輯
+    // 2. 影片時間同步邏輯 (保持不變)
     const desiredVideoTime = currentActiveClip.sourceStart + (currentTime - currentActiveClip.timelineStart);
     if (video.src !== activeMedia.url) { video.src = activeMedia.url; video.currentTime = desiredVideoTime; lastClipIdRef.current = currentActiveClip.id; }
     const isClipChanged = lastClipIdRef.current !== currentActiveClip.id;
@@ -132,25 +139,27 @@ function App() {
 
   // === 互動邏輯：手勢追蹤 (Pan & Zoom) ===
   const bindGestures = useGesture({
-    onDrag: ({ offset: [x, y], event }) => {
+    onDragStart: () => { isTransformingRef.current = true; }, // 開始拖曳：踩煞車
+    onDrag: ({ offset: [x, y] }) => {
       if (!currentActiveClip || !selectedClipId || selectedClipId !== currentActiveClip.id) return;
-      // 這裡不需要 event.preventDefault() 了，因為我們不用 target: window
-      
-      const newTransform = { ...currentRenderTransform, x, y };
+      const newTransform = { ...transformRef.current, x, y };
       updateClipTransform(currentActiveClip.id, newTransform);
       setCurrentRenderTransform(newTransform); 
     },
-    onPinch: ({ offset: [scale, angle], event }) => {
+    onDragEnd: () => { isTransformingRef.current = false; }, // 結束拖曳：放開煞車
+    
+    onPinchStart: () => { isTransformingRef.current = true; }, // 開始縮放：踩煞車
+    onPinch: ({ offset: [scale, angle] }) => {
       if (!currentActiveClip || !selectedClipId || selectedClipId !== currentActiveClip.id) return;
-      
-      const newTransform = { ...currentRenderTransform, scale: scale }; 
+      const newTransform = { ...transformRef.current, scale }; 
       updateClipTransform(currentActiveClip.id, newTransform);
       setCurrentRenderTransform(newTransform);
-    }
+    },
+    onPinchEnd: () => { isTransformingRef.current = false; } // 結束縮放：放開煞車
   }, {
-    // 🗑️ 刪除了 target: window，讓它正常回傳綁定函數
-    drag: { from: () => [currentRenderTransform.x, currentRenderTransform.y] },
-    pinch: { scaleBounds: { min: 0.1, max: 10 }, modifierKey: 'ctrlKey' } 
+    // 🚨 關鍵修復：動態讀取 transformRef.current，告訴套件每次動作的「起點」在哪裡
+    drag: { from: () => [transformRef.current.x, transformRef.current.y] },
+    pinch: { from: () => [transformRef.current.scale, 0], scaleBounds: { min: 0.1, max: 10 }, modifierKey: 'ctrlKey' } 
   });
 
 
