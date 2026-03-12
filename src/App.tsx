@@ -172,7 +172,12 @@ function App() {
             <div className="flex-1 relative overflow-hidden bg-black">
               {library.length > 0 ? (
                 // 影片播放器 (現在它是被引擎控制的傀儡了)
-                <video ref={videoRef} className="absolute inset-0 w-full h-full object-contain" />
+                <video 
+                  ref={videoRef} 
+                  className="absolute inset-0 w-full h-full object-contain" 
+                  playsInline
+                  webkit-playsinline="true"
+                />
               ) : (
                 <div onClick={() => window.innerWidth < 768 && fileInputRef.current?.click()} className="absolute inset-0 flex flex-col items-center justify-center text-neutral-600 cursor-pointer md:cursor-default">
                   <span className="md:hidden mb-2"><Upload size={32} /></span>
