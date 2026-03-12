@@ -21,6 +21,7 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const lastClipIdRef = useRef<string | null>(null);
 
   // === 核心邏輯 1：計算虛擬時間軸的佈局 ===
   // 算出每個片段在時間軸上的起點和終點，以及總長度
@@ -65,28 +66,38 @@ function App() {
     return () => cancelAnimationFrame(animationFrameId);
   }, [isPlaying, totalDuration, setIsPlaying, setCurrentTime]);
 
-  // === 核心邏輯 3：將虛擬時間軸映射到實體 <video> 標籤 ===
+  // === 核心邏輯 3：將虛擬時間軸映射到實體 <video> 標籤 (效能最佳化版) ===
   useEffect(() => {
     if (!currentActiveClip || !activeMedia || !videoRef.current) return;
 
-    // 如果換了片段（跨越到另一部影片），替換 video 來源
-    if (videoRef.current.src !== activeMedia.url) {
-      videoRef.current.src = activeMedia.url;
-    }
-
-    // 計算在當前影片中應該播放的精確秒數
+    const video = videoRef.current;
     const desiredVideoTime = currentActiveClip.sourceStart + (currentTime - currentActiveClip.timelineStart);
 
-    // 同步影像畫面：如果誤差過大（如點擊跳轉），或是處於暫停狀態，就強制重設影片時間
-    if (Math.abs(videoRef.current.currentTime - desiredVideoTime) > 0.3 || !isPlaying) {
-      videoRef.current.currentTime = desiredVideoTime;
+    // 1. 如果換了影片素材 (跨越到另一部影片)，替換 src 並強制設定時間
+    if (video.src !== activeMedia.url) {
+      video.src = activeMedia.url;
+      video.currentTime = desiredVideoTime;
+      lastClipIdRef.current = currentActiveClip.id;
     }
 
-    // 控制播放狀態
-    if (isPlaying && videoRef.current.paused) {
-      videoRef.current.play().catch(() => setIsPlaying(false));
-    } else if (!isPlaying && !videoRef.current.paused) {
-      videoRef.current.pause();
+    // 2. 判斷是否需要強制同步影片時間 (避免干擾原生順暢播放)
+    const isClipChanged = lastClipIdRef.current !== currentActiveClip.id; // 跨越到下一個片段
+    const isDesynced = Math.abs(video.currentTime - desiredVideoTime) > 0.5; // 誤差真的大到不行(大於0.5秒)
+
+    // 只有在「暫停時(手動點擊)」、「片段切換時」或「嚴重脫軌時」才強制設定 currentTime
+    if (!isPlaying || isClipChanged || isDesynced) {
+      // 避免重複設定極微小的時間差而造成微卡頓
+      if (Math.abs(video.currentTime - desiredVideoTime) > 0.05) {
+        video.currentTime = desiredVideoTime;
+      }
+      lastClipIdRef.current = currentActiveClip.id;
+    }
+
+    // 3. 控制播放與暫停
+    if (isPlaying && video.paused) {
+      video.play().catch(() => setIsPlaying(false));
+    } else if (!isPlaying && !video.paused) {
+      video.pause();
     }
   }, [currentTime, currentActiveClip, activeMedia, isPlaying, setIsPlaying]);
 
