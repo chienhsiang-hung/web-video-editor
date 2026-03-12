@@ -1,63 +1,42 @@
 import { create } from 'zustand';
 
-export interface Media {
-  id: string;
-  url: string;
-  name: string;
-  duration: number;
-}
-
-export interface Transform {
-  x: number;     // X軸平移 (像素)
-  y: number;     // Y軸平移 (像素)
-  scale: number; // 縮放比例 (1 = 100%)
-}
-
-export interface Keyframe {
-  id: string;
-  timeOffset: number; // 關鍵幀在該 Clip 內的相對時間 (秒)
-  transform: Transform;
-}
-
+export interface Media { id: string; url: string; name: string; duration: number; }
+export interface Transform { x: number; y: number; scale: number; }
+export interface Keyframe { id: string; timeOffset: number; transform: Transform; }
 export interface Clip {
-  id: string;
-  mediaId: string;
-  sourceStart: number;
-  sourceEnd: number;
-  
-  // === 新增：變形與關鍵幀資料 ===
-  baseTransform: Transform; // 基礎變形狀態
-  keyframes: Keyframe[];    // 記錄時間點上的變形狀態
+  id: string; mediaId: string; sourceStart: number; sourceEnd: number;
+  baseTransform: Transform; keyframes: Keyframe[];
 }
 
 interface EditorState {
-  // 專案畫布長寬比 (例如 16/9)
   projectAspectRatio: number | null;
   setProjectAspectRatio: (ratio: number) => void;
-
   library: Media[];
   addMedia: (media: Media) => void;
-
   clips: Clip[];
   setClips: (clips: Clip[]) => void;
-
   isPlaying: boolean;
   setIsPlaying: (playing: boolean) => void;
   togglePlay: () => void;
-
   currentTime: number;
   setCurrentTime: (time: number | ((prev: number) => number)) => void;
-
   selectedClipId: string | null;
   setSelectedClipId: (id: string | null) => void;
+
+  // 編輯操作
   splitClip: () => void;
   deleteClip: () => void;
   reorderClips: (draggedId: string, targetId: string) => void;
   updateClipTrim: (id: string, newStart: number, newEnd: number) => void;
-
-  // === 新增：變形與關鍵幀操作 ===
   updateClipTransform: (clipId: string, transform: Transform, timeOffset?: number) => void;
   toggleKeyframe: (clipId: string, timeOffset: number, currentTransform: Transform) => void;
+
+  // === 🔄 新增：歷史紀錄系統 (Undo/Redo) ===
+  pastHistory: Clip[][];
+  futureHistory: Clip[][];
+  saveHistory: () => void;
+  undo: () => void;
+  redo: () => void;
 }
 
 const DEFAULT_TRANSFORM: Transform = { x: 0, y: 0, scale: 1 };
@@ -66,31 +45,42 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   projectAspectRatio: null,
   setProjectAspectRatio: (ratio) => set({ projectAspectRatio: ratio }),
 
-  library: [],
-  addMedia: (media) => set((state) => ({
-    library: [...state.library, media],
-    clips: [...state.clips, { 
-      id: Math.random().toString(36).slice(2, 9), 
-      mediaId: media.id, 
-      sourceStart: 0, 
-      sourceEnd: media.duration,
-      baseTransform: { ...DEFAULT_TRANSFORM },
-      keyframes: []
-    }]
+  // 歷史紀錄狀態與方法
+  pastHistory: [],
+  futureHistory: [],
+  saveHistory: () => set((state) => ({
+    pastHistory: [...state.pastHistory, state.clips],
+    futureHistory: [] // 只要有新動作，未來的紀錄就清空
   })),
+  undo: () => set((state) => {
+    if (state.pastHistory.length === 0) return state;
+    const past = [...state.pastHistory];
+    const previousClips = past.pop()!;
+    return { pastHistory: past, futureHistory: [state.clips, ...state.futureHistory], clips: previousClips, selectedClipId: null };
+  }),
+  redo: () => set((state) => {
+    if (state.futureHistory.length === 0) return state;
+    const future = [...state.futureHistory];
+    const nextClips = future.shift()!;
+    return { pastHistory: [...state.pastHistory, state.clips], futureHistory: future, clips: nextClips, selectedClipId: null };
+  }),
+
+  library: [],
+  addMedia: (media) => {
+    get().saveHistory(); // 存檔
+    set((state) => ({
+      library: [...state.library, media],
+      clips: [...state.clips, { id: Math.random().toString(36).slice(2, 9), mediaId: media.id, sourceStart: 0, sourceEnd: media.duration, baseTransform: { ...DEFAULT_TRANSFORM }, keyframes: [] }]
+    }));
+  },
 
   clips: [],
   setClips: (clips) => set({ clips }),
 
-  isPlaying: false,
-  setIsPlaying: (playing) => set({ isPlaying: playing }),
+  isPlaying: false, setIsPlaying: (playing) => set({ isPlaying: playing }),
   togglePlay: () => set((state) => ({ isPlaying: !state.isPlaying })),
-
-  currentTime: 0,
-  setCurrentTime: (time) => set((state) => ({ currentTime: typeof time === 'function' ? time(state.currentTime) : time })),
-
-  selectedClipId: null,
-  setSelectedClipId: (id) => set({ selectedClipId: id }),
+  currentTime: 0, setCurrentTime: (time) => set((state) => ({ currentTime: typeof time === 'function' ? time(state.currentTime) : time })),
+  selectedClipId: null, setSelectedClipId: (id) => set({ selectedClipId: id }),
 
   splitClip: () => {
     const { clips, currentTime } = get();
@@ -103,71 +93,76 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       currentOffset += duration;
     }
     if (targetIndex === -1) return;
+    
+    get().saveHistory(); // 存檔
+
     const clipToSplit = clips[targetIndex];
-    const newClip1: Clip = { ...clipToSplit, id: Math.random().toString(36).slice(2, 9), sourceEnd: localTimeInSource };
-    const newClip2: Clip = { ...clipToSplit, id: Math.random().toString(36).slice(2, 9), sourceStart: localTimeInSource };
+    // ✂️ 修復：剪開影片時，將關鍵幀依據時間點分給前半段與後半段
+    const newClip1: Clip = { 
+      ...clipToSplit, id: Math.random().toString(36).slice(2, 9), sourceEnd: localTimeInSource,
+      keyframes: clipToSplit.keyframes.filter(k => k.timeOffset <= localTimeInSource)
+    };
+    const newClip2: Clip = { 
+      ...clipToSplit, id: Math.random().toString(36).slice(2, 9), sourceStart: localTimeInSource,
+      keyframes: clipToSplit.keyframes.filter(k => k.timeOffset > localTimeInSource)
+    };
     set({ clips: [...clips.slice(0, targetIndex), newClip1, newClip2, ...clips.slice(targetIndex + 1)] });
   },
 
-  deleteClip: () => set((state) => ({ clips: state.clips.filter(c => c.id !== state.selectedClipId), selectedClipId: null })),
+  deleteClip: () => {
+    if (!get().selectedClipId) return;
+    get().saveHistory(); // 存檔
+    set((state) => ({ clips: state.clips.filter(c => c.id !== state.selectedClipId), selectedClipId: null }));
+  },
 
-  reorderClips: (draggedId, targetId) => set((state) => {
+  reorderClips: (draggedId, targetId) => {
+    const state = get();
     const oldIndex = state.clips.findIndex(c => c.id === draggedId);
     const newIndex = state.clips.findIndex(c => c.id === targetId);
-    if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return state;
-    const newClips = [...state.clips];
-    const [moved] = newClips.splice(oldIndex, 1);
-    newClips.splice(newIndex, 0, moved);
-    return { clips: newClips };
-  }),
+    if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
+    
+    get().saveHistory(); // 存檔
+    set((state) => {
+      const newClips = [...state.clips];
+      const [moved] = newClips.splice(oldIndex, 1);
+      newClips.splice(newIndex, 0, moved);
+      return { clips: newClips };
+    });
+  },
 
   updateClipTrim: (id, newStart, newEnd) => set((state) => ({
     clips: state.clips.map(c => c.id === id ? { ...c, sourceStart: newStart, sourceEnd: newEnd } : c)
   })),
 
-  // 加上明確的型別宣告 (clipId: string, transform: Transform, timeOffset?: number)
-  updateClipTransform: (clipId: string, transform: Transform, timeOffset?: number) => set((state) => {
+  updateClipTransform: (clipId, transform, timeOffset) => set((state) => {
     return {
       clips: state.clips.map(clip => {
         if (clip.id !== clipId) return clip;
-        
-        // 如果沒有傳入時間，或者是這支影片「完全沒有」關鍵幀，那就只更新基礎變形
-        if (timeOffset === undefined || clip.keyframes.length === 0) {
-          return { ...clip, baseTransform: transform };
-        }
-
-        // === 💎 自動關鍵幀引擎 (Auto-Keyframing) ===
+        if (timeOffset === undefined || clip.keyframes.length === 0) return { ...clip, baseTransform: transform };
         const TIME_TOLERANCE = 0.1; 
         const existingIdx = clip.keyframes.findIndex(k => Math.abs(k.timeOffset - timeOffset) < TIME_TOLERANCE);
-        
         let newKeyframes = [...clip.keyframes];
-        if (existingIdx >= 0) {
-          newKeyframes[existingIdx] = { ...newKeyframes[existingIdx], transform };
-        } else {
-          newKeyframes.push({ id: Math.random().toString(36).slice(2, 9), timeOffset, transform });
-        }
-        
+        if (existingIdx >= 0) newKeyframes[existingIdx] = { ...newKeyframes[existingIdx], transform };
+        else newKeyframes.push({ id: Math.random().toString(36).slice(2, 9), timeOffset, transform });
         return { ...clip, keyframes: newKeyframes };
       })
     };
   }),
 
-  // 新增/移除 關鍵幀 (菱形按鈕)
-  toggleKeyframe: (clipId, timeOffset, currentTransform) => set((state) => {
-    return {
-      clips: state.clips.map(clip => {
-        if (clip.id !== clipId) return clip;
-        const TIME_TOLERANCE = 0.1; // 0.1秒內的關鍵幀視為同一個
-        const existingIdx = clip.keyframes.findIndex(k => Math.abs(k.timeOffset - timeOffset) < TIME_TOLERANCE);
-        
-        let newKeyframes = [...clip.keyframes];
-        if (existingIdx >= 0) {
-          newKeyframes.splice(existingIdx, 1); // 如果已經有，就刪除 (Toggle off)
-        } else {
-          newKeyframes.push({ id: Math.random().toString(36).slice(2, 9), timeOffset, transform: currentTransform }); // 新增
-        }
-        return { ...clip, keyframes: newKeyframes };
-      })
-    };
-  })
+  toggleKeyframe: (clipId, timeOffset, currentTransform) => {
+    get().saveHistory(); // 存檔
+    set((state) => {
+      return {
+        clips: state.clips.map(clip => {
+          if (clip.id !== clipId) return clip;
+          const TIME_TOLERANCE = 0.1; 
+          const existingIdx = clip.keyframes.findIndex(k => Math.abs(k.timeOffset - timeOffset) < TIME_TOLERANCE);
+          let newKeyframes = [...clip.keyframes];
+          if (existingIdx >= 0) newKeyframes.splice(existingIdx, 1);
+          else newKeyframes.push({ id: Math.random().toString(36).slice(2, 9), timeOffset, transform: currentTransform });
+          return { ...clip, keyframes: newKeyframes };
+        })
+      };
+    });
+  }
 }));
