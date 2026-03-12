@@ -92,28 +92,56 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedClipId, deleteClip, currentTime, totalDuration, undo, redo]);
 
-  // 匯出引擎 (略，與上一版相同)
+  // === 🚀 匯出核心邏輯 (支援 MP4 動態偵測) ===
   const startExport = () => {
     if (clips.length === 0 || !exportCanvasRef.current || !videoRef.current) return;
     setCurrentTime(0); setIsExporting(true); isExportingRef.current = true;
+    
     const canvas = exportCanvasRef.current;
     canvas.width = 1280; canvas.height = 1280 / (projectAspectRatio || 16/9);
     let stream = canvas.captureStream(30);
+    
     try {
       const vidNode = videoRef.current as any;
       const vidStream = vidNode.captureStream ? vidNode.captureStream() : vidNode.mozCaptureStream ? vidNode.mozCaptureStream() : null;
       if (vidStream && vidStream.getAudioTracks().length > 0) stream = new MediaStream([ ...stream.getVideoTracks(), ...vidStream.getAudioTracks() ]);
     } catch (e) { console.warn("Audio capture not supported."); }
-    const mimeType = MediaRecorder.isTypeSupported('video/webm; codecs=vp9') ? 'video/webm; codecs=vp9' : 'video/webm';
+
+    // 🌟 聰明的格式偵測：優先嘗試蘋果支援的 MP4，再來是 H.264，最後才是 WebM
+    let mimeType = '';
+    let fileExtension = 'webm';
+    
+    const typesToTry = [
+      { mime: 'video/mp4', ext: 'mp4' },                           // iPhone Safari 原生支援的 MP4
+      { mime: 'video/webm; codecs=h264', ext: 'mp4' },             // Chrome 支援的 H264 (偷吃步存成 mp4 通常能播)
+      { mime: 'video/webm; codecs=vp9', ext: 'webm' },             // 高畫質 WebM
+      { mime: 'video/webm', ext: 'webm' }                          // 最終備案
+    ];
+
+    for (const t of typesToTry) {
+      if (MediaRecorder.isTypeSupported(t.mime)) {
+        mimeType = t.mime;
+        fileExtension = t.ext;
+        break;
+      }
+    }
+
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8000000 });
     mediaRecorderRef.current = recorder;
     const chunks: BlobPart[] = [];
+    
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
     recorder.onstop = () => {
       const blob = new Blob(chunks, { type: mimeType });
-      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'WebEditor_Export.webm';
-      a.click(); URL.revokeObjectURL(a.href); setIsExporting(false); isExportingRef.current = false;
+      const a = document.createElement('a'); 
+      a.href = URL.createObjectURL(blob); 
+      a.download = `WebEditor_Export.${fileExtension}`; // 👈 動態套用正確的副檔名
+      a.click(); 
+      URL.revokeObjectURL(a.href); 
+      setIsExporting(false); 
+      isExportingRef.current = false;
     };
+    
     recorder.start(); setIsPlaying(true);
   };
 
@@ -252,7 +280,7 @@ function App() {
         
         <button onClick={startExport} disabled={clips.length === 0 || isExporting} className={`flex items-center gap-2 px-4 py-1.5 rounded text-sm font-semibold transition-colors disabled:opacity-80 ${isExporting ? 'bg-indigo-600 animate-pulse' : 'bg-blue-600 hover:bg-blue-500'}`}>
           {isExporting && <Loader2 size={16} className="animate-spin" />}
-          {isExporting ? `Exporting... ${Math.floor((currentTime / totalDuration) * 100)}%` : 'Export WebM'}
+          {isExporting ? `Exporting... ${Math.floor((currentTime / totalDuration) * 100)}%` : 'Export Video'}
         </button>
       </header>
 
