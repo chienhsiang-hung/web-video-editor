@@ -56,7 +56,7 @@ interface EditorState {
   updateClipTrim: (id: string, newStart: number, newEnd: number) => void;
 
   // === 新增：變形與關鍵幀操作 ===
-  updateClipTransform: (clipId: string, transform: Transform) => void;
+  updateClipTransform: (clipId: string, transform: Transform, timeOffset?: number) => void;
   toggleKeyframe: (clipId: string, timeOffset: number, currentTransform: Transform) => void;
 }
 
@@ -125,14 +125,29 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     clips: state.clips.map(c => c.id === id ? { ...c, sourceStart: newStart, sourceEnd: newEnd } : c)
   })),
 
-  // 更新目前的變形 (如果剛好在關鍵幀上，就更新該關鍵幀；否則更新基礎變形)
-  updateClipTransform: (clipId, transform) => set((state) => {
+  // 加上明確的型別宣告 (clipId: string, transform: Transform, timeOffset?: number)
+  updateClipTransform: (clipId: string, transform: Transform, timeOffset?: number) => set((state) => {
     return {
       clips: state.clips.map(clip => {
         if (clip.id !== clipId) return clip;
-        // 為了簡化 MVP，每次拖曳我們都直接更新 baseTransform，
-        // 真實邏輯可以進化為：如果有關鍵幀，就自動插入/更新當前時間的關鍵幀
-        return { ...clip, baseTransform: transform };
+        
+        // 如果沒有傳入時間，或者是這支影片「完全沒有」關鍵幀，那就只更新基礎變形
+        if (timeOffset === undefined || clip.keyframes.length === 0) {
+          return { ...clip, baseTransform: transform };
+        }
+
+        // === 💎 自動關鍵幀引擎 (Auto-Keyframing) ===
+        const TIME_TOLERANCE = 0.1; 
+        const existingIdx = clip.keyframes.findIndex(k => Math.abs(k.timeOffset - timeOffset) < TIME_TOLERANCE);
+        
+        let newKeyframes = [...clip.keyframes];
+        if (existingIdx >= 0) {
+          newKeyframes[existingIdx] = { ...newKeyframes[existingIdx], transform };
+        } else {
+          newKeyframes.push({ id: Math.random().toString(36).slice(2, 9), timeOffset, transform });
+        }
+        
+        return { ...clip, keyframes: newKeyframes };
       })
     };
   }),

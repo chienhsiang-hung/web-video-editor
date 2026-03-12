@@ -139,25 +139,28 @@ function App() {
 
   // === 互動邏輯：手勢追蹤 (Pan & Zoom) ===
   const bindGestures = useGesture({
-    onDragStart: () => { isTransformingRef.current = true; }, // 開始拖曳：踩煞車
+    onDragStart: () => { isTransformingRef.current = true; }, 
     onDrag: ({ offset: [x, y] }) => {
       if (!currentActiveClip || !selectedClipId || selectedClipId !== currentActiveClip.id) return;
       const newTransform = { ...transformRef.current, x, y };
-      updateClipTransform(currentActiveClip.id, newTransform);
+      
+      // 👈 關鍵改動：傳入 timeInActiveClip，觸發自動關鍵幀！
+      updateClipTransform(currentActiveClip.id, newTransform, timeInActiveClip); 
       setCurrentRenderTransform(newTransform); 
     },
-    onDragEnd: () => { isTransformingRef.current = false; }, // 結束拖曳：放開煞車
+    onDragEnd: () => { isTransformingRef.current = false; }, 
     
-    onPinchStart: () => { isTransformingRef.current = true; }, // 開始縮放：踩煞車
+    onPinchStart: () => { isTransformingRef.current = true; }, 
     onPinch: ({ offset: [scale, angle] }) => {
       if (!currentActiveClip || !selectedClipId || selectedClipId !== currentActiveClip.id) return;
       const newTransform = { ...transformRef.current, scale }; 
-      updateClipTransform(currentActiveClip.id, newTransform);
+      
+      // 👈 關鍵改動：傳入 timeInActiveClip，觸發自動關鍵幀！
+      updateClipTransform(currentActiveClip.id, newTransform, timeInActiveClip); 
       setCurrentRenderTransform(newTransform);
     },
-    onPinchEnd: () => { isTransformingRef.current = false; } // 結束縮放：放開煞車
+    onPinchEnd: () => { isTransformingRef.current = false; } 
   }, {
-    // 🚨 關鍵修復：動態讀取 transformRef.current，告訴套件每次動作的「起點」在哪裡
     drag: { from: () => [transformRef.current.x, transformRef.current.y] },
     pinch: { from: () => [transformRef.current.scale, 0], scaleBounds: { min: 0.1, max: 10 }, modifierKey: 'ctrlKey' } 
   });
