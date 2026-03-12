@@ -5,26 +5,26 @@ import { useEditorStore } from './store';
 function App() {
   const { isPlaying, togglePlay, setIsPlaying, videoSrc, setVideoSrc } = useEditorStore();
   
-  // 用來操作隱藏的 file input 以及 video 標籤
+  // References for the hidden file input and the video element
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  // 處理影片選擇
+  // Handle video file selection
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
-      // 產生純前端的暫存預覽網址
+      // Generate a temporary frontend-only URL for preview
       const objectUrl = URL.createObjectURL(file);
       setVideoSrc(objectUrl);
-      setIsPlaying(false); // 匯入新影片時先暫停
+      setIsPlaying(false); // Pause when importing a new video
     }
   };
 
-  // 監聽 Zustand 的 isPlaying 狀態，來控制實際的 video 標籤播放/暫停
+  // Sync actual video element playback with Zustand's isPlaying state
   useEffect(() => {
     if (videoRef.current) {
       if (isPlaying) {
-        videoRef.current.play().catch(() => setIsPlaying(false)); // 處理瀏覽器自動播放限制
+        videoRef.current.play().catch(() => setIsPlaying(false)); // Handle browser autoplay restrictions
       } else {
         videoRef.current.pause();
       }
@@ -32,9 +32,10 @@ function App() {
   }, [isPlaying, setIsPlaying]);
 
   return (
-    <div className="flex flex-col h-screen bg-neutral-900 text-white font-sans">
+    // Use 100dvh to prevent mobile browser UI bars from hiding content
+    <div className="flex flex-col h-[100dvh] bg-neutral-900 text-white font-sans overflow-hidden">
       
-      {/* 隱藏的檔案輸入框 */}
+      {/* Hidden file input */}
       <input 
         type="file" 
         accept="video/*" 
@@ -43,57 +44,70 @@ function App() {
         className="hidden" 
       />
 
-      {/* 頂部導航列 */}
-      <header className="h-14 border-b border-neutral-700 flex items-center px-4 justify-between bg-neutral-800">
-        <h1 className="font-bold text-lg">WebEditor Pro</h1>
-        <button className="bg-blue-600 hover:bg-blue-500 px-4 py-1.5 rounded text-sm font-semibold transition-colors">
-          匯出影片
+      {/* Top Navigation Bar */}
+      <header className="h-14 shrink-0 border-b border-neutral-700 flex items-center px-4 justify-between bg-neutral-800">
+        <h1 className="font-bold text-base md:text-lg truncate pr-2">WebEditor Pro</h1>
+        <button className="bg-blue-600 hover:bg-blue-500 px-3 py-1.5 md:px-4 md:py-2 rounded text-xs md:text-sm font-semibold transition-colors shrink-0">
+          Export
         </button>
       </header>
 
-      <main className="flex-1 flex flex-col overflow-hidden">
+      <main className="flex-1 flex flex-col min-h-0">
         
-        {/* 上半部 (素材庫 + 預覽畫面) */}
-        <div className="flex-1 flex min-h-[40vh]">
-          {/* 左側素材庫 (Desktop) */}
-          <aside className="w-1/4 border-r border-neutral-700 bg-neutral-800 p-4 hidden md:block">
-            <h2 className="text-sm font-semibold mb-4 text-neutral-400">本地素材</h2>
+        {/* Upper Section (Media Library + Preview) */}
+        <div className="flex-1 flex flex-col md:flex-row min-h-0">
+          
+          {/* Left Media Library (Desktop only) */}
+          <aside className="w-1/4 max-w-[250px] border-r border-neutral-700 bg-neutral-800 p-4 hidden md:flex flex-col shrink-0">
+            <h2 className="text-sm font-semibold mb-4 text-neutral-400">Local Media</h2>
             <div 
               onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed border-neutral-600 rounded-lg p-8 flex flex-col justify-center items-center text-neutral-500 cursor-pointer hover:border-blue-500 hover:text-blue-400 transition-colors gap-2"
+              className="border-2 border-dashed border-neutral-600 rounded-lg p-6 flex flex-col justify-center items-center text-neutral-500 cursor-pointer hover:border-blue-500 hover:text-blue-400 transition-colors gap-2"
             >
               <Upload size={24} />
-              <span>點擊匯入影片</span>
+              <span className="text-sm text-center">Click to import</span>
             </div>
           </aside>
 
-          {/* 中央預覽區 */}
-          <section className="flex-1 flex flex-col bg-black">
-            {/* 影片預覽 */}
-            <div className="flex-1 flex items-center justify-center relative overflow-hidden">
+          {/* Center Preview Area */}
+          <section className="flex-1 flex flex-col bg-black min-h-0 relative">
+            
+            {/* Mobile Import Button (Visible only on mobile when no video) */}
+            {!videoSrc && (
+              <button 
+                className="md:hidden absolute top-4 right-4 z-10 bg-neutral-800/80 p-2 rounded-full text-neutral-300 hover:text-white"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Upload size={20} />
+              </button>
+            )}
+
+            {/* Video Preview */}
+            <div className="flex-1 flex items-center justify-center relative overflow-hidden p-2">
               {videoSrc ? (
                 <video 
                   ref={videoRef}
                   src={videoSrc} 
-                  className="max-w-full max-h-full"
-                  onEnded={() => setIsPlaying(false)} // 播完自動切換為暫停狀態
-                  // 未來可以加上 onTimeUpdate 來同步時間軸
+                  className="w-full h-full object-contain"
+                  playsInline // Crucial for mobile iOS to prevent auto full-screen
+                  onEnded={() => setIsPlaying(false)} // Pause automatically when ended
+                  // TODO: Add onTimeUpdate to sync timeline playhead
                 />
               ) : (
                 <div 
-                  className="text-neutral-600 flex flex-col items-center gap-2 cursor-pointer md:cursor-default"
-                  onClick={() => window.innerWidth < 768 && fileInputRef.current?.click()} // 手機版點擊中央也可以匯入
+                  className="text-neutral-600 flex flex-col items-center gap-3 cursor-pointer md:cursor-default"
+                  onClick={() => window.innerWidth < 768 && fileInputRef.current?.click()}
                 >
-                  <span className="md:hidden"><Upload size={32} /></span>
-                  <span>請先匯入影片素材</span>
+                  <span className="md:hidden"><Upload size={40} className="text-neutral-500" /></span>
+                  <span className="text-sm md:text-base text-center px-4">Import a video to start editing</span>
                 </div>
               )}
             </div>
             
-            {/* 播放控制器 */}
-            <div className="h-12 border-t border-neutral-800 flex items-center justify-center gap-4 bg-neutral-900">
+            {/* Playback Controls */}
+            <div className="h-12 shrink-0 border-t border-neutral-800 flex items-center justify-center gap-6 bg-neutral-900 px-4">
               <button 
-                className="p-2 hover:bg-neutral-800 rounded-full transition-colors text-neutral-400 hover:text-white disabled:opacity-50"
+                className="p-3 hover:bg-neutral-800 rounded-full transition-colors text-neutral-400 hover:text-white disabled:opacity-50"
                 disabled={!videoSrc}
                 onClick={() => {
                   if (videoRef.current) {
@@ -107,32 +121,36 @@ function App() {
               <button 
                 onClick={togglePlay}
                 disabled={!videoSrc}
-                className="p-2 hover:bg-neutral-800 rounded-full transition-colors disabled:opacity-50"
+                className="p-3 bg-neutral-800 hover:bg-neutral-700 rounded-full transition-colors disabled:opacity-50 text-white"
               >
-                {isPlaying ? <Pause size={24} /> : <Play size={24} />}
+                {isPlaying ? <Pause size={20} /> : <Play size={20} className="ml-0.5" />}
               </button>
             </div>
           </section>
         </div>
 
-        {/* 下半部：時間軸 (Timeline) - 暫時保持不變 */}
-        <div className="h-1/3 min-h-[250px] border-t border-neutral-700 bg-neutral-800 flex flex-col">
-          <div className="h-10 border-b border-neutral-700 flex items-center px-4 gap-2">
-             <button className="p-1.5 hover:bg-neutral-700 rounded text-neutral-300">
+        {/* Lower Section: Timeline */}
+        <div className="h-[35%] md:h-1/3 min-h-[160px] md:min-h-[250px] shrink-0 border-t border-neutral-700 bg-neutral-800 flex flex-col">
+          <div className="h-10 shrink-0 border-b border-neutral-700 flex items-center px-2 md:px-4 gap-2">
+             <button className="p-2 hover:bg-neutral-700 rounded text-neutral-300 transition-colors">
                 <Scissors size={18} />
              </button>
-             <span className="text-xs text-neutral-500 ml-auto">00:00:00 / 00:00:00</span>
+             <span className="text-xs text-neutral-400 font-mono ml-auto">00:00:00 / 00:00:00</span>
           </div>
           
-          <div className="flex-1 p-2 overflow-y-auto relative">
-             <div className="h-6 border-b border-neutral-700 mb-2"></div>
-             <div className="h-16 bg-neutral-900 rounded mb-2 flex items-center relative overflow-hidden">
-                <div className="absolute left-10 w-48 h-full bg-blue-900/50 border border-blue-500 rounded flex items-center px-2 text-xs select-none">
-                   影片片段 1.mp4
-                </div>
-             </div>
-             <div className="absolute top-0 bottom-0 left-[100px] w-0.5 bg-red-500 z-10">
-                <div className="absolute -top-1 -left-1.5 w-3.5 h-3.5 bg-red-500 rounded-full"></div>
+          <div className="flex-1 p-2 md:p-4 overflow-x-auto overflow-y-hidden relative">
+             {/* Timeline Track Container - allows horizontal scrolling */}
+             <div className="min-w-[800px] h-full relative">
+               <div className="h-6 border-b border-neutral-700 mb-2"></div>
+               <div className="h-16 bg-neutral-900 rounded mb-2 flex items-center relative overflow-hidden">
+                  <div className="absolute left-10 w-48 h-full bg-blue-900/50 border border-blue-500 rounded flex items-center px-2 text-xs select-none truncate">
+                      Clip_1.mp4
+                  </div>
+               </div>
+               {/* Playhead */}
+               <div className="absolute top-0 bottom-0 left-[100px] w-0.5 bg-red-500 z-10 pointer-events-none">
+                  <div className="absolute -top-1 -left-1.5 w-3.5 h-3.5 bg-red-500 rounded-full shadow-md"></div>
+               </div>
              </div>
           </div>
         </div>
