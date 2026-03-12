@@ -16,7 +16,9 @@ function App() {
     currentTime, setCurrentTime,
     selectedClipId, setSelectedClipId, splitClip, deleteClip, reorderClips
   } = useEditorStore();
-  
+  // === 新增：定義時間軸縮放比例 (1秒 = 50px) ===
+  const TIME_SCALE = 50;
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -120,8 +122,9 @@ function App() {
     if (!timelineRef.current || totalDuration === 0) return;
     const rect = timelineRef.current.getBoundingClientRect();
     const clickX = clientX - rect.left;
-    const percentage = Math.max(0, Math.min(1, clickX / rect.width));
-    setCurrentTime(percentage * totalDuration);
+    // 直接把點擊的像素座標除以 TIME_SCALE，得到秒數
+    const newTime = Math.max(0, Math.min(clickX / TIME_SCALE, totalDuration));
+    setCurrentTime(newTime);
   };
 
   const handleTimelinePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -154,7 +157,8 @@ function App() {
 
     // 計算目前的像素對應幾秒鐘 (比例尺)
     const rect = timelineRef.current.getBoundingClientRect();
-    const pxToSec = totalDuration / rect.width;
+    // 固定的像素與時間換算率
+    const pxToSec = 1 / TIME_SCALE;
 
     trimmingRef.current = { id, edge, startX: e.clientX, initialStart: clip.sourceStart, initialEnd: clip.sourceEnd, pxToSec, maxDuration: mediaDuration };
     
@@ -259,35 +263,37 @@ function App() {
              </span>
           </div>
           
-          <div className="flex-1 p-2 overflow-y-auto relative select-none">
-             <div className="h-6 border-b border-neutral-700 mb-2"></div>
+          {/* 加入橫向滾動 overflow-x-auto */}
+          <div className="flex-1 p-2 overflow-x-auto overflow-y-hidden relative select-none">
              
              {/* 加入 Pointer 事件來監聽滑動 */}
              <div 
                ref={timelineRef} 
-               className="relative w-full h-16 cursor-pointer bg-neutral-900 rounded" 
+               className="relative h-16 cursor-pointer bg-neutral-900 rounded mt-2" 
+               // 讓時間軸的總寬度 = 總秒數 * 50px (如果太短，至少撐滿畫面 min-w-full)
+               style={{ width: `${totalDuration * TIME_SCALE}px`, minWidth: '100%' }}
                onPointerDown={handleTimelinePointerDown}
                onPointerMove={handleTimelinePointerMove}
                onPointerUp={handleTimelinePointerUp}
-               onPointerLeave={handleTimelinePointerUp} // 避免滑鼠離開區域後紅線卡住
+               onPointerLeave={handleTimelinePointerUp}
              >
                {clips.length > 0 && (
-                 <div className="absolute top-0 left-0 w-full h-full flex">
+                 <div className="absolute top-0 left-0 h-full flex">
                     {timelineLayout.map((clip) => {
-                      const widthPercent = (clip.duration / totalDuration) * 100;
+                      // 改用絕對像素寬度，而不是百分比！
+                      const widthPx = clip.duration * TIME_SCALE;
                       const isSelected = selectedClipId === clip.id;
                       const media = library.find(m => m.id === clip.mediaId);
                       
                       return (
                         <div 
                           key={clip.id}
-                          className={`clip-element h-full border-y border-r first:border-l flex justify-center items-center text-xs overflow-hidden relative transition-colors cursor-grab active:cursor-grabbing
+                          className={`clip-element h-full border-y border-r first:border-l flex justify-center items-center text-xs overflow-hidden relative transition-colors cursor-grab active:cursor-grabbing shrink-0
                             ${isSelected ? 'bg-yellow-900/40 border-yellow-500 text-yellow-200 z-20' : 'bg-blue-900/50 border-blue-500 text-blue-200 hover:bg-blue-800/50 z-10'}
                           `}
-                          style={{ width: `${widthPercent}%` }}
+                          style={{ width: `${widthPx}px` }} // 👈 這裡套用絕對寬度
                           onClick={() => setSelectedClipId(clip.id)}
                           
-                          // 只有在沒有拖曳邊緣的時候，才允許 HTML5 拖曳換位
                           draggable={!trimmingRef.current}
                           onDragStart={(e) => { e.dataTransfer.setData('text/plain', clip.id); setSelectedClipId(clip.id); }}
                           onDragOver={(e) => e.preventDefault()}
@@ -297,10 +303,8 @@ function App() {
                             if (draggedId) reorderClips(draggedId, clip.id);
                           }}
                         >
-                          {/* 顯示素材名稱 */}
                           <span className="pointer-events-none truncate px-4">{media?.name.substring(0, 10)}...</span>
 
-                          {/* 左右黃色裁切把手 (僅在選取時顯示) */}
                           {isSelected && media && (
                             <>
                               <div 
@@ -324,7 +328,11 @@ function App() {
                )}
                
                {clips.length > 0 && (
-                 <div className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-40 pointer-events-none" style={{ left: `${playheadPosition}%` }}>
+                 <div 
+                   className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-40 pointer-events-none" 
+                   // 紅線的定位也改用 transform translateX，效能更好且絕對精準！
+                   style={{ transform: `translateX(${currentTime * TIME_SCALE}px)` }} 
+                 >
                     <div className="absolute -top-1 -left-1.5 w-3.5 h-3.5 bg-red-500 rounded-full"></div>
                  </div>
                )}
