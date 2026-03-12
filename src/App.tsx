@@ -243,8 +243,8 @@ function App() {
       <header className="h-14 border-b border-neutral-700 flex items-center px-4 justify-between bg-neutral-800 shrink-0">
         <div className="flex items-center gap-4">
           <h1 className="font-bold text-lg text-blue-400">WebEditor Pro</h1>
-          {/* 👈 加入 Undo / Redo 按鈕 */}
-          <div className="hidden md:flex items-center gap-1 ml-4 border-l border-neutral-700 pl-4">
+          {/* 👈 加入 Undo / Redo 按鈕 (移除 hidden，優化手機間距) */}
+          <div className="flex items-center gap-1 ml-2 md:ml-4 border-l border-neutral-700 pl-2 md:pl-4">
             <button onClick={undo} disabled={pastHistory.length === 0} className="p-1.5 hover:bg-neutral-700 rounded text-neutral-400 disabled:opacity-30 transition-colors" title="Undo (Ctrl+Z)"><Undo2 size={18} /></button>
             <button onClick={redo} disabled={futureHistory.length === 0} className="p-1.5 hover:bg-neutral-700 rounded text-neutral-400 disabled:opacity-30 transition-colors" title="Redo (Ctrl+Y)"><Redo2 size={18} /></button>
           </div>
