@@ -1,5 +1,5 @@
 import { useRef, useEffect, useMemo } from 'react';
-import { Play, Pause, Square, Scissors, Upload, Trash2, Film } from 'lucide-react';
+import { Play, Pause, Square, Scissors, Upload, Trash2, Film, Plus } from 'lucide-react';
 import { useEditorStore, type Media } from './store';
 
 const formatTime = (seconds: number) => {
@@ -210,6 +210,17 @@ function App() {
 
         <div className="h-1/3 min-h-[250px] border-t border-neutral-700 bg-neutral-800 flex flex-col">
           <div className="h-10 border-b border-neutral-700 flex items-center px-4 gap-2">
+            {/* 👇 新增：手機版專用的「加入素材」按鈕 */}
+             <button 
+               onClick={() => fileInputRef.current?.click()} 
+               className="md:hidden p-1.5 hover:bg-neutral-700 rounded text-blue-400 transition-colors" 
+               title="Add Video"
+             >
+                <Plus size={20} />
+             </button>
+             {/* 手機版專用的分隔線 */}
+             <div className="w-px h-4 bg-neutral-700 md:hidden mx-1"></div>
+             
              <button onClick={splitClip} disabled={clips.length === 0} className="p-1.5 hover:bg-neutral-700 rounded text-neutral-300 disabled:opacity-50 transition-colors" title="Split">
                 <Scissors size={18} />
              </button>
